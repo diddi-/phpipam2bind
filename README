@@ -1,0 +1,139 @@
+Purpose of this tool
+
+The purpose of this tool is to dynamically create BIND DNS zone data based on the data stored in a phpIPAM database.
+How it works
+
+It's actually quite a simple script although many lines of code is needed to make things happen. The script connects to a phpIPAM database using the libphpipam-perl library and fetches all allocated ip addresses currently stored within the database. For each IP address, the script checks and verifies the domain name of the address, comparing it to an editable list within the script. If the domain name of an address matches one in the list, a BIND query is generated (both forward and reverse record) which is then sent to the BIND server. When all updates have been sent, a local copy of all current addresses and their DNS records are stored on the local server for generating diffs on later script runs.
+The forward and reverse records are added dynamically using security keys which are pre-configured on the BIND server.
+Pre-requisites
+
+BIND
+In order to get phpipam2bind work for a specific zone, a couple of steps must first be completed on the BIND server
+Creating the DNS keys
+A key must be generated on the BIND server
+<code>dnssec-keygen -a HMAC-MD5 -b 512 -n HOST phpipam2bind_dns_key</code>
+and then be configured in the named.conf file
+<code>
+ key "phpipam2bind_dns_key." {
+       algorithm HMAC-MD5;
+       secret "fxT7q+Kq8TUmZrN4edxAVeTeOmiX/3A6HQ40HcyI...g==";
+ };
+</code>
+Configuring a zone
+When the key has been configured, the zone entry must also be configured to accept this key
+<code>
+   zone "subdomain1.mydomain.com" IN {
+       type master;
+       file "subdomain1.mydomain.com";
+       allow-update { key "phpipam2bind_dns_key."; };
+   };
+   zone "1.168.192.in-addr.arpa" IN {
+       type master;
+       file "1.168.192.in-addr.arpa";
+       allow-update { key "phpipam2bind_dns_key."; };
+   };
+</code>
+
+phpipam2bind
+When the BIND server has been configured to accept and use the keys, the script itself must be configured to use the key for dynamic updates. At the beginning of the script there are a couple of settings need to be set prior to using phpipam2bind for the first time
+<code>
+ my $work_dir = '/var/lib/phpipam2bind/';
+ my $nameservers = ['192.168.0.2'];
+ my $dns_ttl = "500";
+ my $dns_key = "fxT7q+Kq8TUmZrN4edxAVeTeOmiX/3A6HQ40HcyI...g==";
+ my $dns_key_name = "phpipam2bind_dns_key";
+ my $dns_zones = ['subdomain1.mydomain.com', 'subdomain2.mydomain.com'];
+ my $dns_reverse = {
+   '192.168.1.0/24' => '1.168.192.in-addr.arpa',
+ };
+ 
+ my $phpipam_zones = ['MySection']; 
+ 
+ my $phpipam_dbhost = "localhost";
+ my $phpipam_dbname = "phpipam";
+ my $phpipam_dbuser = "phpipam";
+ my $phpipam_dbpass = "phpipam";
+</code>
+work_dir - This is where phpipam2bind stores its own database of records that have been added/deleted
+nameservers - This is an array of all nameservers that are to be sent the dynamic updates to
+dns_ttl - This is the TTL option to be sent in the updates (required)
+dns_key - This is the dynamic key to be used when making the updates. Ensure that the key is the same in phpipam2bind and BIND named.conf
+dns_key_name - This is the "name" of the key. The dns_key_name must match the name in BIND named.conf
+dns_zones - This is a list of zones to have phpipam2bind look for and make updates for
+dns_reverse - This is a list of subnets and what zones they're part of in the BIND configuration
+phpipam_zones - This is a list of phpIPAM sections to search for allocated addresses
+phpipam_db* - Database credentials information for connecting to the phpipam MySQL database
+Making changes
+
+Adding a new zone
+
+To have phpipam2bind check for new zones, make sure the zone is already configured in BIND using the dynamic key (the same key must be used for all zones). When the BIND server has been configured, simply add the new zone name in the dns_zones list and let the script run. The new zone will automatically be checked at next run and updates are made accordingly.
+Deleting a zone
+
+Deleting a zone might be a bit trickier. As the phpipam2bind will only "care" about the zones configured in the dns_zones list, if a zone is removed, it will no longer make any changes regarding that zone. This means that if a zone is deleted all records already registered with the BIND server will remain active (they will not be removed).
+To remove all data records for a zone, manual intervention is needed on the BIND server (that is, manually deleting the records in the zone file).
+Troubleshooting
+
+Records aren't updated
+
+If the script fails to update records for a certain dns zone, make sure
+The script is running (check cron records)
+The script can connect and gather data from the phpIPAM database
+The script are allowed to make updates for that zone according to BIND server configuration (named.conf)
+The dynamic key is correct and matches in named.conf and phpipam2bind script
+If all of the above has been checked, one may try and delete the local database to force an all-zone update.
+<code>root@server:~# rm -rf $work_dir/db.$zone.phpipam2bind</code>
+Note: Substitue $work_dir and $zone with the working directory configured in the script and the zone name you want to delete
+By deleting the local database a new database will be created and an all-zone update will be forced on the next script run. This is usually safe from the BIND server point of view, but remember that the script no longer have any information about what records have been added before so no records can be deleted until a new database have been created.
+Records aren't being deleted from BIND
+
+The script will only know to delete records that are previously stored in the local database (which is being updated/re-written at each execution of the script). The script will never delete records from BIND that is not already in the local database.
+It is theoretically possible that the script will find a record to be deleted, but then fails to do so (for any number of reasons) and re-writes the database. This will make the script think the record has already been deleted while it is in fact still active on the BIND server.
+In such cases, the only way to delete the record is by manually editing the zone file on the BIND server and reload the zone.
+Force a new run
+
+The script is perfectly safe to run in command-line as long as all environments settings are correct. Executing the script manually may be useful if the waiting time for the next cron-run is too long.
+For example (if using perlbrew):
+<code>
+diddi@phpipam:~$ PERLBREW_VERSION=0.66 \
+PERLBREW_PERL=perl-5.18.0 \
+PERLBREW_BASHRC_VERSION=0.66 \
+PERLBREW_ROOT=/usr/local/perlbrew \
+PATH=/usr/local/perlbrew/bin:/usr/local/perlbrew/perls/perl-5.18.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games \
+PERLBREW_HOME=/home/diddi/.perlbrew \
+PERLBREW_MANPATH=/usr/local/perlbrew/perls/perl-5.18.0/man \
+PERLBREW_PATH=/usr/local/perlbrew/bin:/usr/local/perlbrew/perls/perl-5.18.0/bin \
+/usr/local/bin/phpipam2bind
+</code>
+
+Links and misc information
+
+
+Dependencies
+* libphpipam-perl - https://github.com/diddi-/libphpipam-perl
+
+
+Disclamer
+This is a hack. The script was originally created for a specific use-case and does not necessairly work in all environments.
+I am not responsible if anything goes wrong.
+
+You may use all or parts of this script for whatever purpose you find it useful.
+If you find any bugs or weird stuff that doesn't work, create a github issue for this project or submit a patch.
+
+All contributions in any form are always welcome!
+
+
+****
+Copyright (C) 2015 by Diddi Oscarsson
+
+The MIT License (MIT) Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Diddi Oscarsson
+diddi@diddi.se
+
+https://github.com/diddi-/phpipam2bind
+
